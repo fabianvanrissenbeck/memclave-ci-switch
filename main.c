@@ -58,7 +58,7 @@ _Static_assert(offsetof(ci_msg, rank_nr) == 4, "ci_msg incorrectly ordered");
 
 
 static const char* s_sock_name = "/tmp/ci-switch.sock";
-static const char* s_dpu_profile = "backend=simulator,rankMode=perf";
+static const char* s_dpu_profile = "backend=hw,rankMode=perf";
 
 /** set to true on SIGTERM and SIGINT to properly cleanup allocated data before exiting */
 volatile static bool s_sig_term_received = false;
@@ -250,7 +250,8 @@ static dpu_error_t custom_finalize_fault_process_for_dpu(struct dpu_t* dpu, stru
 }
 
 static void reset_for_rank(struct dpu_rank_t* rank) {
-    struct dpu_context_t ctx[MAX_NR_DPUS_PER_RANK];
+    struct dpu_context_t* ctx = calloc(MAX_NR_DPUS_PER_RANK, sizeof(*ctx));
+    assert(ctx != NULL);
 
     for (int i = 0; i < MAX_NR_DPUS_PER_RANK; ++i) {
         struct dpu_t* dpu = dpu_get(rank, i / 8, i % 8);
@@ -288,6 +289,7 @@ static void reset_for_rank(struct dpu_rank_t* rank) {
     }
 
     DPU_ASSERT(dpu_poll_rank(rank));
+    free(ctx);
 }
 
 int main() {
@@ -300,7 +302,7 @@ int main() {
     struct dpu_set_t set;
 
     DPU_ASSERT(dpu_alloc_ranks(1, s_dpu_profile, &set));
-    DPU_ASSERT(dpu_load(set, "foo.bar", NULL));
+    DPU_ASSERT(dpu_load(set, "./fault", NULL));
     DPU_ASSERT(dpu_launch(set, DPU_ASYNCHRONOUS));
 
     while (!s_sig_term_received) {
@@ -338,7 +340,7 @@ int main() {
             break;
         }
 
-        if (send_ci_msg(fd, msg) < 0) {
+        if (send_ci_msg(fd, resp) < 0) {
             printf("Cannot send message: %s\n", strerror(errno));
         }
     }
