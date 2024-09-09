@@ -8,5 +8,8 @@ pkg_check_modules(DPU REQUIRED IMPORTED_TARGET dpu)
 
 add_executable(ci-switch main.c)
 
+add_subdirectory(common)
+target_link_libraries(ci-switch PRIVATE common)
+
 target_include_directories(ci-switch PRIVATE PkgConfig::DPU)
 target_link_libraries(ci-switch PUBLIC PkgConfig::DPU)

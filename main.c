@@ -1,3 +1,5 @@
+#include "vci-msg.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,46 +20,6 @@
 #include <dpu_management.h>
 #include <dpu_transfer_matrix.h>
 
-typedef enum ci_msg_type {
-    /** returned when receiving invalid message */
-    CI_MSG_ERR = -3,
-    /** local system error */
-    CI_SYS_ERR = -2,
-    /** returned if DPUs are in an inconsistent state */
-    CI_ERR = -1,
-    /** standard response for most commands */
-    CI_OK,
-    /** check whether a given rank is present */
-    CI_PRESENT,
-    /** set up the MUX for host access */
-    CI_ACQ_MUX,
-    /** set up the MUX for DPU access */
-    CI_REL_MUX,
-    /** response to CI_GET_STATUS */
-    CI_STATUS,
-    /** get the done and fault status */
-    CI_GET_STATUS,
-    /** recover a potential fault and set the PC to 0 */
-    CI_RST_DPUS,
-} ci_msg_type;
-
-/** message structure passed over the unix socket */
-typedef struct ci_msg {
-    int8_t type;
-    uint8_t ci_nr;
-    uint8_t done_bits;
-    uint8_t fault_bits;
-    uint32_t rank_nr;
-} ci_msg;
-
-_Static_assert(sizeof(ci_msg) == 8, "ci_msg struct packed incorrectly");
-_Static_assert(offsetof(ci_msg, ci_nr) == 1, "ci_msg incorrectly ordered");
-_Static_assert(offsetof(ci_msg, done_bits) == 2, "ci_msg incorrectly ordered");
-_Static_assert(offsetof(ci_msg, fault_bits) == 3, "ci_msg incorrectly ordered");
-_Static_assert(offsetof(ci_msg, rank_nr) == 4, "ci_msg incorrectly ordered");
-
-
-static const char* s_sock_name = "/tmp/ci-switch.sock";
 static const char* s_dpu_profile = "backend=hw,rankMode=perf";
 
 /** set to true on SIGTERM and SIGINT to properly cleanup allocated data before exiting */
@@ -83,7 +45,7 @@ static int init_unix_socket(void) {
     int sock = -1;
     struct sockaddr_un addr = { 0 };
 
-    if (unlink(s_sock_name) < 0 && errno != ENOENT) {
+    if (unlink(VCI_SOCKET_NAME) < 0 && errno != ENOENT) {
         goto error;
     }
 
@@ -92,7 +54,7 @@ static int init_unix_socket(void) {
     }
 
     addr.sun_family = AF_UNIX;
-    strcpy(addr.sun_path, s_sock_name);
+    strcpy(addr.sun_path, VCI_SOCKET_NAME);
 
     if (bind(sock, (struct sockaddr*) &addr, sizeof(addr)) < 0) {
         goto error;
@@ -110,24 +72,24 @@ error:
 }
 
 /** receive and validate message from the socket */
-static ci_msg recv_ci_msg(int sock) {
-    ci_msg res = { 0 };
+static vci_msg recv_ci_msg(int sock) {
+    vci_msg res = {0 };
 
     if (recvfrom(sock, &res, sizeof(res), 0, NULL, NULL) != sizeof(res)) {
-        res.type = CI_SYS_ERR;
+        res.type = VCI_SYS_ERR;
         return res;
     }
 
-    if (res.type < 0 || res.type == CI_STATUS || res.type == CI_OK || res.type > CI_RST_DPUS || res.ci_nr >= 8) {
-        res.type = CI_MSG_ERR;
+    if (res.type < 0 || res.type == VCI_STATUS || res.type == VCI_OK || res.type > VCI_RST_DPUS || res.ci_nr >= 8) {
+        res.type = VCI_MSG_ERR;
     }
 
     return res;
 }
 
 /** validate and sent a message to the socket */
-static int send_ci_msg(int sock, ci_msg msg) {
-    assert(msg.type == CI_OK || msg.type == CI_STATUS || msg.type == CI_ERR || msg.type == CI_SYS_ERR);
+static int send_ci_msg(int sock, vci_msg msg) {
+    assert(msg.type == VCI_OK || msg.type == VCI_STATUS || msg.type == VCI_ERR || msg.type == VCI_SYS_ERR);
 
     if (sendto(sock, &msg, sizeof(msg), 0, NULL, 0) < 0) {
         return -1;
@@ -137,7 +99,7 @@ static int send_ci_msg(int sock, ci_msg msg) {
 }
 
 /** print out message in readable format */
-static void log_ci_msg(ci_msg msg) {
+static void log_ci_msg(vci_msg msg) {
     printf(
         "{ .type = %d, .ci_nr = %u, .done_bits = %u, .fault_bits = %u, .rank_nr = %u }\n",
         msg.type, msg.ci_nr, msg.done_bits, msg.fault_bits, msg.rank_nr
@@ -306,7 +268,7 @@ int main() {
     DPU_ASSERT(dpu_launch(set, DPU_ASYNCHRONOUS));
 
     while (!s_sig_term_received) {
-        ci_msg msg = recv_ci_msg(fd);
+        vci_msg msg = recv_ci_msg(fd);
 
         if (msg.type < 0) {
             printf("received invalid message: ");
@@ -315,27 +277,27 @@ int main() {
             continue;
         }
 
-        ci_msg resp = { CI_OK };
+        vci_msg resp = {VCI_OK };
 
         switch (msg.type) {
-        case CI_PRESENT:
-            // if present, react with CI_OK, otherwise with CI_ERR
+        case VCI_PRESENT:
+            // if present, react with VCI_OK, otherwise with VCI_ERR
             break;
 
-        case CI_ACQ_MUX:
+        case VCI_ACQ_MUX:
             // right now only one rank is supported
             switch_mux_for_rank(set.list.ranks[0], true);
             break;
 
-        case CI_REL_MUX:
+        case VCI_REL_MUX:
             switch_mux_for_rank(set.list.ranks[0], false);
             break;
 
-        case CI_GET_STATUS:
+        case VCI_GET_STATUS:
             status_for_ci(set.list.ranks[0], msg.ci_nr, &resp.done_bits, &resp.fault_bits);
             break;
 
-        case CI_RST_DPUS:
+        case VCI_RST_DPUS:
             reset_for_rank(set.list.ranks[0]);
             break;
         }
