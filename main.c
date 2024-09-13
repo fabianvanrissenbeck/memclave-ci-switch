@@ -315,6 +315,8 @@ int main() {
 
         case VCI_GET_STATUS:
             status_for_ci(set.list.ranks[0], msg.ci_nr, &resp.done_bits, &resp.fault_bits);
+
+            resp.type = VCI_STATUS;
             break;
 
         case VCI_RST_DPUS:
