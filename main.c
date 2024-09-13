@@ -96,7 +96,7 @@ static vci_msg recv_ci_msg(msg_queue* q) {
 
 /** validate and sent a message to the socket */
 static int send_ci_msg(msg_queue* q, vci_msg msg) {
-    assert(msg.type == VCI_OK || msg.type == VCI_STATUS || msg.type == VCI_ERR || msg.type == VCI_SYS_ERR);
+    assert(msg.type == VCI_OK || msg.type == VCI_STATUS || msg.type == VCI_IS_PRESENT || msg.type == VCI_ERR || msg.type == VCI_SYS_ERR);
 
     if (sendto(q->sock, &msg, sizeof(msg), 0, (void*) &q->resp_addr, q->resp_len) < 0) {
         return -1;
@@ -292,11 +292,16 @@ int main() {
         printf("[RECV] ");
         log_ci_msg(msg);
 
-        vci_msg resp = {VCI_OK };
+        vci_msg resp = { VCI_OK };
 
         switch (msg.type) {
         case VCI_PRESENT:
-            // if present, react with VCI_OK, otherwise with VCI_ERR
+            if (msg.rank_nr == 0) {
+                resp.type = VCI_IS_PRESENT;
+            } else {
+                resp.type = VCI_ERR;
+            }
+
             break;
 
         case VCI_ACQ_MUX:
