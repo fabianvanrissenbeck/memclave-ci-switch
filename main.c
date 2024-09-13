@@ -20,6 +20,12 @@
 #include <dpu_management.h>
 #include <dpu_transfer_matrix.h>
 
+typedef struct msg_queue {
+    int sock;
+    struct sockaddr_un resp_addr;
+    socklen_t resp_len;
+} msg_queue;
+
 static const char* s_dpu_profile = "backend=hw,rankMode=perf";
 
 /** set to true on SIGTERM and SIGINT to properly cleanup allocated data before exiting */
@@ -29,7 +35,7 @@ static void on_sig_received(__attribute__((unused)) int n) {
     if (!s_sig_term_received) {
         s_sig_term_received = true;
     } else {
-        printf("Received signal multiple times: Exiting\n");
+        printf("[EXIT] Received signal multiple times: Exiting\n");
         exit(EXIT_FAILURE);
     }
 }
@@ -41,7 +47,7 @@ static void setup_signal_handlers(void) {
 }
 
 /** create a unix socket receiving abstract ci commands */
-static int init_unix_socket(void) {
+static msg_queue init_unix_socket(void) {
     int sock = -1;
     struct sockaddr_un addr = { 0 };
 
@@ -60,22 +66,23 @@ static int init_unix_socket(void) {
         goto error;
     }
 
-    return sock;
+    return (msg_queue) { .sock = sock };
 
 error:
     if (sock) {
         close(sock);
     }
 
-    printf("cannot create socket: %s\n", strerror(errno));
-    return -1;
+    printf("[FAIL] cannot create socket: %s\n", strerror(errno));
+    return (msg_queue) { .sock = -1 };
 }
 
 /** receive and validate message from the socket */
-static vci_msg recv_ci_msg(int sock) {
-    vci_msg res = {0 };
+static vci_msg recv_ci_msg(msg_queue* q) {
+    vci_msg res = { 0 };
+    q->resp_len = sizeof(struct sockaddr_un);
 
-    if (recvfrom(sock, &res, sizeof(res), 0, NULL, NULL) != sizeof(res)) {
+    if (recvfrom(q->sock, &res, sizeof(res), 0, (void*) &q->resp_addr, &q->resp_len) != sizeof(res)) {
         res.type = VCI_SYS_ERR;
         return res;
     }
@@ -88,14 +95,19 @@ static vci_msg recv_ci_msg(int sock) {
 }
 
 /** validate and sent a message to the socket */
-static int send_ci_msg(int sock, vci_msg msg) {
+static int send_ci_msg(msg_queue* q, vci_msg msg) {
     assert(msg.type == VCI_OK || msg.type == VCI_STATUS || msg.type == VCI_ERR || msg.type == VCI_SYS_ERR);
 
-    if (sendto(sock, &msg, sizeof(msg), 0, NULL, 0) < 0) {
+    if (sendto(q->sock, &msg, sizeof(msg), 0, (void*) &q->resp_addr, q->resp_len) < 0) {
         return -1;
     }
 
     return 0;
+}
+
+/* close socket associated with the message queue */
+static void close_msg_queue(msg_queue* q) {
+    close(q->sock);
 }
 
 /** print out message in readable format */
@@ -255,9 +267,9 @@ static void reset_for_rank(struct dpu_rank_t* rank) {
 }
 
 int main() {
-    int fd = init_unix_socket();
+    msg_queue q = init_unix_socket();
 
-    if (fd < 0) {
+    if (q.sock < 0) {
         return EXIT_FAILURE;
     }
 
@@ -268,14 +280,17 @@ int main() {
     DPU_ASSERT(dpu_launch(set, DPU_ASYNCHRONOUS));
 
     while (!s_sig_term_received) {
-        vci_msg msg = recv_ci_msg(fd);
+        vci_msg msg = recv_ci_msg(&q);
 
         if (msg.type < 0) {
-            printf("received invalid message: ");
+            printf("[FAIL] received invalid message: ");
             log_ci_msg(msg);
 
             continue;
         }
+
+        printf("[RECV] ");
+        log_ci_msg(msg);
 
         vci_msg resp = {VCI_OK };
 
@@ -302,13 +317,16 @@ int main() {
             break;
         }
 
-        if (send_ci_msg(fd, resp) < 0) {
-            printf("Cannot send message: %s\n", strerror(errno));
+        printf("[SEND] ");
+        log_ci_msg(resp);
+
+        if (send_ci_msg(&q, resp) < 0) {
+            printf("[FAIL] Cannot send message: %s\n", strerror(errno));
         }
     }
 
     dpu_free(set);
-    close(fd);
+    close_msg_queue(&q);
 
     return 0;
 }
