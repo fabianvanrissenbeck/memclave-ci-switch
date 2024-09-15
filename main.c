@@ -322,6 +322,8 @@ static int parse_cli_args(int argc, char** argv, cli_args* out_args) {
                 printf("[FAIL] Value out of range for option --nr-ranks\n");
                 return -1;
             }
+
+            out_args->nr_ranks = nr_ranks;
         } else {
             printf("[FAIL] Unkown option --%.*s\n", (int) key_len, key);
             return -1;
