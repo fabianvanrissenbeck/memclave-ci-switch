@@ -32,6 +32,12 @@ typedef struct msg_queue {
     socklen_t resp_len;
 } msg_queue;
 
+typedef struct switch_state {
+    struct {
+        struct dpu_rank_t* rank;
+    } ranks[40];
+} switch_state;
+
 static const char* s_dpu_profile = "backend=hw,rankMode=perf";
 
 /** set to true on SIGTERM and SIGINT to properly cleanup allocated data before exiting */
@@ -325,6 +331,11 @@ static int parse_cli_args(int argc, char** argv, cli_args* out_args) {
     return 0;
 }
 
+static unsigned short get_rank_id(const struct dpu_rank_t* rank) {
+    const short* ptr = (short*)((uint8_t*) rank + 6);
+    return *ptr;
+}
+
 int main(int argc, char** argv) {
     cli_args args;
 
@@ -338,11 +349,20 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    struct dpu_set_t set;
+    struct dpu_set_t set, rank;
+    switch_state state = { 0 };
 
     DPU_ASSERT(dpu_alloc_ranks(args.nr_ranks, s_dpu_profile, &set));
     DPU_ASSERT(dpu_load(set, "./fault", NULL));
     DPU_ASSERT(dpu_launch(set, DPU_ASYNCHRONOUS));
+
+    DPU_RANK_FOREACH(set, rank) {
+        struct dpu_rank_t* r = rank.list.ranks[0];
+        unsigned short id = get_rank_id(r);
+
+        printf("[INFO] Allocated rank %u\n", id);
+        state.ranks[id].rank = r;
+    }
 
     while (!s_sig_term_received) {
         vci_msg msg = recv_ci_msg(&q);
@@ -359,37 +379,48 @@ int main(int argc, char** argv) {
 
         vci_msg resp = { VCI_OK };
 
-        switch (msg.type) {
-        case VCI_PRESENT:
-            if (msg.rank_nr == 0) {
-                resp.type = VCI_IS_PRESENT;
-            } else {
-                resp.type = VCI_ERR;
+        if (msg.rank_nr >= 40 || state.ranks[msg.rank_nr].rank == NULL) {
+            printf("[FAIL] received vci message for invalid rank number\n");
+            resp.type = VCI_ERR;
+
+            printf("[SEND] ");
+            log_ci_msg(resp);
+
+            if (send_ci_msg(&q, resp) < 0) {
+                printf("[FAIL] Cannot send message: %s\n", strerror(errno));
             }
 
+            continue;
+        }
+
+        switch (msg.type) {
+        case VCI_PRESENT:
+            // not present case already handled above
+            resp.type = VCI_IS_PRESENT;
             break;
 
         case VCI_ACQ_MUX:
             // right now only one rank is supported
-            switch_mux_for_rank(set.list.ranks[0], true);
+            switch_mux_for_rank(state.ranks[msg.rank_nr].rank, true);
             break;
 
         case VCI_REL_MUX:
-            switch_mux_for_rank(set.list.ranks[0], false);
+            switch_mux_for_rank(state.ranks[msg.rank_nr].rank, false);
             break;
 
         case VCI_GET_STATUS:
-            status_for_ci(set.list.ranks[0], msg.ci_nr, &resp.done_bits, &resp.fault_bits);
+            status_for_ci(state.ranks[msg.rank_nr].rank, msg.ci_nr, &resp.done_bits, &resp.fault_bits);
 
             resp.type = VCI_STATUS;
             break;
 
         case VCI_RST_DPUS:
-            reset_for_rank(set.list.ranks[0]);
+            reset_for_rank(state.ranks[msg.rank_nr].rank);
             break;
 
+        // TODO: Undo temporary extension
         case VCI_RST_DPUS + 1:
-            switch_mux_for_rank(set.list.ranks[0], true);
+            switch_mux_for_rank(state.ranks[msg.rank_nr].rank, true);
 
             uint64_t buf[64];
             struct dpu_transfer_matrix mat;
