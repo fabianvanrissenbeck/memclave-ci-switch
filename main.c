@@ -379,10 +379,15 @@ int main(int argc, char** argv) {
         printf("[RECV] ");
         log_ci_msg(msg);
 
-        vci_msg resp = { VCI_OK };
+        // mirror rank number in responses to allow multiple ranks to use a single socket
+        vci_msg resp = {
+                .type = VCI_OK,
+                .rank_nr = msg.rank_nr
+        };
 
         if (msg.rank_nr >= 40 || state.ranks[msg.rank_nr].rank == NULL) {
             printf("[FAIL] received vci message for invalid rank number\n");
+
             resp.type = VCI_ERR;
 
             printf("[SEND] ");
