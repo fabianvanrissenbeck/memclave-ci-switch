@@ -1,5 +1,6 @@
 #include "vci-msg.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +18,13 @@
 #include <dpu.h>
 #include <dpu_debug.h>
 #include <dpu_runner.h>
+#include <dpu_memory.h>
 #include <dpu_management.h>
 #include <dpu_transfer_matrix.h>
+
+typedef struct cli_args {
+    int nr_ranks;
+} cli_args;
 
 typedef struct msg_queue {
     int sock;
@@ -87,7 +93,8 @@ static vci_msg recv_ci_msg(msg_queue* q) {
         return res;
     }
 
-    if (res.type < 0 || res.type == VCI_STATUS || res.type == VCI_OK || res.type > VCI_RST_DPUS || res.ci_nr >= 8) {
+    // TODO: Undo temporary extension
+    if (res.type < 0 || res.type == VCI_STATUS || res.type == VCI_OK || res.type > VCI_RST_DPUS + 1 || res.ci_nr >= 8) {
         res.type = VCI_MSG_ERR;
     }
 
@@ -266,7 +273,65 @@ static void reset_for_rank(struct dpu_rank_t* rank) {
     free(ctx);
 }
 
-int main() {
+static int parse_cli_args(int argc, char** argv, cli_args* out_args) {
+    *out_args = (cli_args) {
+        .nr_ranks = 1
+    };
+
+    for (int i = 1; i < argc; ++i) {
+        const char* cur = argv[i];
+        size_t len = strlen(cur);
+
+        if (len < 2) {
+            printf("[FAIL] Invalid argument syntax: \"%s\"", cur);
+            return -1;
+        }
+
+        cur += 2;
+        len -= 2;
+
+        const char* val = strchr(cur, '=');
+
+        if (val == NULL) {
+            printf("[FAIL] Invalid argument syntax: \"%s\"\n", cur);
+            return -1;
+        }
+
+        val += 1;
+
+        const char* key = cur;
+        size_t val_len = strlen(val);
+        size_t key_len = len - val_len - 1;
+
+        if (key_len == sizeof("nr_ranks") - 1 && memcmp(key, "nr-ranks", key_len) == 0) {
+            char* end_ptr = NULL;
+            long nr_ranks = strtol(val, &end_ptr, 10);
+
+            if (end_ptr == val || *end_ptr != '\0' || !isdigit(val[0])) {
+                printf("[FAIL] Invalid value for option --nr-ranks\n");
+                return -1;
+            }
+
+            if (nr_ranks <= 0 || nr_ranks >= 40) {
+                printf("[FAIL] Value out of range for option --nr-ranks\n");
+                return -1;
+            }
+        } else {
+            printf("[FAIL] Unkown option --%.*s\n", (int) key_len, key);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    cli_args args;
+
+    if (parse_cli_args(argc, argv, &args) < 0) {
+        return EXIT_FAILURE;
+    }
+
     msg_queue q = init_unix_socket();
 
     if (q.sock < 0) {
@@ -275,7 +340,7 @@ int main() {
 
     struct dpu_set_t set;
 
-    DPU_ASSERT(dpu_alloc_ranks(1, s_dpu_profile, &set));
+    DPU_ASSERT(dpu_alloc_ranks(args.nr_ranks, s_dpu_profile, &set));
     DPU_ASSERT(dpu_load(set, "./fault", NULL));
     DPU_ASSERT(dpu_launch(set, DPU_ASYNCHRONOUS));
 
@@ -321,6 +386,37 @@ int main() {
 
         case VCI_RST_DPUS:
             reset_for_rank(set.list.ranks[0]);
+            break;
+
+        case VCI_RST_DPUS + 1:
+            switch_mux_for_rank(set.list.ranks[0], true);
+
+            uint64_t buf[64];
+            struct dpu_transfer_matrix mat;
+
+            mat.type = DPU_DEFAULT_XFER_MATRIX;
+            mat.offset = 0;
+            mat.size = sizeof(uint64_t);
+
+            for (int i = 0; i < MAX_NR_DPUS_PER_RANK; ++i) {
+                mat.ptr[i] = &buf[i];
+            }
+
+            DPU_ASSERT(dpu_copy_from_mrams(set.list.ranks[0], &mat));
+
+            for (int i = 0; i < 8; ++i) {
+                printf("%016lx", buf[i * 8]);
+
+                for (int j = 1; j < 8; ++j) {
+                    printf("%016lx", buf[i * 8 + j]);
+                }
+
+                printf("\n");
+            }
+
+            memset(buf, 0, sizeof(buf));
+            DPU_ASSERT(dpu_copy_to_mrams(set.list.ranks[0], &mat));
+
             break;
         }
 
