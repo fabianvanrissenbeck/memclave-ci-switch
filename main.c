@@ -334,8 +334,11 @@ static int parse_cli_args(int argc, char** argv, cli_args* out_args) {
 }
 
 static unsigned short get_rank_id(const struct dpu_rank_t* rank) {
-    const short* ptr = (short*)((uint8_t*) rank + 6);
-    return *ptr;
+    const short* ptr = (short*)((uint8_t*) rank + 4);
+    unsigned res = (*ptr) & 0xFFF;
+
+    assert(res < 40);
+    return res;
 }
 
 int main(int argc, char** argv) {
@@ -440,7 +443,7 @@ int main(int argc, char** argv) {
                 mat.ptr[i] = &buf[i];
             }
 
-            DPU_ASSERT(dpu_copy_from_mrams(set.list.ranks[0], &mat));
+            DPU_ASSERT(dpu_copy_from_mrams(state.ranks[msg.rank_nr].rank, &mat));
 
             for (int i = 0; i < 8; ++i) {
                 printf("%016lx", buf[i * 8]);
@@ -453,7 +456,7 @@ int main(int argc, char** argv) {
             }
 
             memset(buf, 0, sizeof(buf));
-            DPU_ASSERT(dpu_copy_to_mrams(set.list.ranks[0], &mat));
+            DPU_ASSERT(dpu_copy_to_mrams(state.ranks[msg.rank_nr].rank, &mat));
 
             break;
         }
