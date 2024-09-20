@@ -58,6 +58,18 @@ static void setup_signal_handlers(void) {
     signal(SIGINT, on_sig_received);
 }
 
+/** print out message in readable format */
+static void log_ci_msg(const char* prefix, const char* param, vci_msg msg) {
+    char buf[120];
+    vci_msg_to_string(msg, buf);
+
+    if (param) {
+        printf("[%s %s] %s\n", prefix, param, buf);
+    } else {
+        printf("[%s] %s\n", prefix, buf);
+    }
+}
+
 /** create a unix socket receiving abstract ci commands */
 static msg_queue init_unix_socket(void) {
     int sock = -1;
@@ -104,6 +116,7 @@ static vci_msg recv_ci_msg(msg_queue* q) {
         res.type = VCI_MSG_ERR;
     }
 
+    log_ci_msg("RECV", q->resp_addr.sun_path, res);
     return res;
 }
 
@@ -115,20 +128,13 @@ static int send_ci_msg(msg_queue* q, vci_msg msg) {
         return -1;
     }
 
+    log_ci_msg("SEND", q->resp_addr.sun_path, msg);
     return 0;
 }
 
 /* close socket associated with the message queue */
 static void close_msg_queue(msg_queue* q) {
     close(q->sock);
-}
-
-/** print out message in readable format */
-static void log_ci_msg(vci_msg msg) {
-    printf(
-        "{ .type = %d, .ci_nr = %u, .done_bits = %u, .fault_bits = %u, .rank_nr = %u }\n",
-        msg.type, msg.ci_nr, msg.done_bits, msg.fault_bits, msg.rank_nr
-    );
 }
 
 static void switch_mux_for_rank(struct dpu_rank_t* rank, bool switch_for_host) {
@@ -373,14 +379,9 @@ int main(int argc, char** argv) {
         vci_msg msg = recv_ci_msg(&q);
 
         if (msg.type < 0) {
-            printf("[FAIL] received invalid message: ");
-            log_ci_msg(msg);
-
+            log_ci_msg("FAIL", NULL, msg);
             continue;
         }
-
-        printf("[RECV] ");
-        log_ci_msg(msg);
 
         // mirror rank number in responses to allow multiple ranks to use a single socket
         vci_msg resp = {
@@ -392,9 +393,6 @@ int main(int argc, char** argv) {
             printf("[FAIL] received vci message for invalid rank number\n");
 
             resp.type = VCI_ERR;
-
-            printf("[SEND] ");
-            log_ci_msg(resp);
 
             if (send_ci_msg(&q, resp) < 0) {
                 printf("[FAIL] Cannot send message: %s\n", strerror(errno));
@@ -460,9 +458,6 @@ int main(int argc, char** argv) {
 
             break;
         }
-
-        printf("[SEND] ");
-        log_ci_msg(resp);
 
         if (send_ci_msg(&q, resp) < 0) {
             printf("[FAIL] Cannot send message: %s\n", strerror(errno));
