@@ -453,9 +453,6 @@ int main(int argc, char** argv) {
                 printf("\n");
             }
 
-            memset(buf, 0, sizeof(buf));
-            DPU_ASSERT(dpu_copy_to_mrams(state.ranks[msg.rank_nr].rank, &mat));
-
             break;
         }
 
