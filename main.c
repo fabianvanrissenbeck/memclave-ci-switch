@@ -347,6 +347,21 @@ static unsigned short get_rank_id(const struct dpu_rank_t* rank) {
     return res;
 }
 
+static void print_hexdump(size_t n, const uint8_t* buf) {
+    FILE* pp = popen("xxd", "w");
+
+    if (pp == NULL) {
+        perror("popen()");
+        return;
+    }
+
+    if (fwrite(buf, 1, n, pp) < n) {
+        perror("fwrite()");
+    }
+
+    pclose(pp);
+}
+
 int main(int argc, char** argv) {
     cli_args args;
 
@@ -430,28 +445,11 @@ int main(int argc, char** argv) {
         case VCI_RST_DPUS + 1:
             switch_mux_for_rank(state.ranks[msg.rank_nr].rank, true);
 
-            uint64_t buf[64];
-            struct dpu_transfer_matrix mat;
+            struct dpu_t* dpu = dpu_get(state.ranks[msg.rank_nr].rank, 0, 0);
+            uint64_t buf[2] = { 0 };
 
-            mat.type = DPU_DEFAULT_XFER_MATRIX;
-            mat.offset = 0;
-            mat.size = sizeof(uint64_t);
-
-            for (int i = 0; i < MAX_NR_DPUS_PER_RANK; ++i) {
-                mat.ptr[i] = &buf[i];
-            }
-
-            DPU_ASSERT(dpu_copy_from_mrams(state.ranks[msg.rank_nr].rank, &mat));
-
-            for (int i = 0; i < 8; ++i) {
-                printf("%016lx", buf[i * 8]);
-
-                for (int j = 1; j < 8; ++j) {
-                    printf("%016lx", buf[i * 8 + j]);
-                }
-
-                printf("\n");
-            }
+            DPU_ASSERT(dpu_copy_from_mram(dpu, (uint8_t*) &buf[0], 0, sizeof(buf)));
+            print_hexdump(sizeof(buf), (const uint8_t*) &buf[0]);
 
             break;
         }
