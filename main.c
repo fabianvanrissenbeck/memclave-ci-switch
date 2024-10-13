@@ -253,9 +253,6 @@ static void reset_for_rank(struct dpu_rank_t* rank) {
         /* TODO: Figure out what that last argument does */
         DPU_ASSERT(dpu_initialize_fault_process_for_dpu(dpu, &ctx[i], 0x1000));
 
-        DPU_ASSERT(dpu_extract_pcs_for_dpu(dpu, &ctx[i]));
-        DPU_ASSERT(dpu_extract_context_for_dpu(dpu, &ctx[i]));
-
         dpu_thread_t tid = ctx[i].bkp_fault_thread_index;
         unsigned res = ctx[i].bkp_fault_id;
 
