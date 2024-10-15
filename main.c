@@ -1,4 +1,4 @@
-#include "vci-msg.h"
+#include "common/vci-msg.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -242,7 +242,7 @@ static dpu_error_t custom_finalize_fault_process_for_dpu(struct dpu_t* dpu, stru
     return status;
 }
 
-static void reset_for_rank(struct dpu_rank_t* rank) {
+static void reset_for_rank(struct dpu_rank_t* rank, bool set_crypt_regs) {
     struct dpu_context_t* ctx = calloc(MAX_NR_DPUS_PER_RANK, sizeof(*ctx));
     assert(ctx != NULL);
 
@@ -252,6 +252,17 @@ static void reset_for_rank(struct dpu_rank_t* rank) {
 
         /* TODO: Figure out what that last argument does */
         DPU_ASSERT(dpu_initialize_fault_process_for_dpu(dpu, &ctx[i], 0x1000));
+
+        if (set_crypt_regs) {
+            DPU_ASSERT(dpu_extract_context_for_dpu(dpu, &ctx[i]));
+
+            for (int j = 0; j < 4; ++j) {
+                ctx[i].registers[14 + j] = 0;
+                ctx[i].registers[18 + j] = 0x10101010;
+            }
+
+            DPU_ASSERT(dpu_restore_context_for_dpu(dpu, &ctx[i]));
+        }
 
         dpu_thread_t tid = ctx[i].bkp_fault_thread_index;
         unsigned res = ctx[i].bkp_fault_id;
@@ -359,6 +370,53 @@ static void print_hexdump(size_t n, const uint8_t* buf) {
     pclose(pp);
 }
 
+static void wait_for_faults(struct dpu_rank_t* rank) {
+    uint64_t done, fault;
+
+    do {
+        done = 0;
+        fault = 0;
+
+        uint8_t done_u8;
+        uint8_t fault_u8;
+
+        for (int i = 0; i < 8; ++i) {
+            status_for_ci(rank, i, &done_u8, &fault_u8);
+
+            done |= done_u8 << (i * 8);
+            fault |= fault_u8 << (i * 8);
+        }
+
+        usleep(1000);
+    } while ((done | fault ) != UINT64_MAX);
+}
+
+static void init_crypto_regs(switch_state* state) {
+    for (int i = 0; i < 40; ++i) {
+        if (state->ranks[i].rank == NULL) {
+            continue;
+        }
+
+        wait_for_faults(state->ranks[i].rank);
+    }
+
+    for (int i = 0; i < 40; ++i) {
+        if (state->ranks[i].rank == NULL) {
+            continue;
+        }
+
+        reset_for_rank(state->ranks[i].rank, true);
+    }
+
+    for (int i = 0; i < 40; ++i) {
+        if (state->ranks[i].rank == NULL) {
+            continue;
+        }
+
+        wait_for_faults(state->ranks[i].rank);
+    }
+}
+
 int main(int argc, char** argv) {
     cli_args args;
 
@@ -386,6 +444,9 @@ int main(int argc, char** argv) {
         printf("[INFO] Allocated rank %u\n", id);
         state.ranks[id].rank = r;
     }
+
+    init_crypto_regs(&state);
+    puts("All ranks up and running.");
 
     while (!s_sig_term_received) {
         vci_msg msg = recv_ci_msg(&q);
@@ -435,7 +496,7 @@ int main(int argc, char** argv) {
             break;
 
         case VCI_RST_DPUS:
-            reset_for_rank(state.ranks[msg.rank_nr].rank);
+            reset_for_rank(state.ranks[msg.rank_nr].rank, false);
             break;
 
         // TODO: Undo temporary extension
