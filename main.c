@@ -111,7 +111,6 @@ static vci_msg recv_ci_msg(msg_queue* q) {
         return res;
     }
 
-    // TODO: Undo temporary extension
     if (res.type < 0 || res.type == VCI_STATUS || res.type == VCI_OK || res.type > VCI_RST_DPUS + 1 || res.ci_nr >= 8) {
         res.type = VCI_MSG_ERR;
     }
@@ -250,15 +249,16 @@ static void reset_for_rank(struct dpu_rank_t* rank, bool set_crypt_regs) {
         struct dpu_t* dpu = dpu_get(rank, i / 8, i % 8);
         DPU_ASSERT(dpu_context_fill_from_rank(&ctx[i], rank));
 
-        /* TODO: Figure out what that last argument does */
         DPU_ASSERT(dpu_initialize_fault_process_for_dpu(dpu, &ctx[i], 0x1000));
 
         if (set_crypt_regs) {
             DPU_ASSERT(dpu_extract_context_for_dpu(dpu, &ctx[i]));
 
-            for (int j = 0; j < 4; ++j) {
-                ctx[i].registers[14 + j] = 0;
-                ctx[i].registers[18 + j] = 0x10101010;
+            for (int j = 0; j < 24; ++j) {
+                for (int k = 0; k < 4; ++k) {
+                    ctx[i].registers[14 + k + 24 * j] = 0;
+                    ctx[i].registers[18 + k + 24 * j] = 0x10101010;
+                }
             }
 
             DPU_ASSERT(dpu_restore_context_for_dpu(dpu, &ctx[i]));
