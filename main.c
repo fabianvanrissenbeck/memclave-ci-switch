@@ -481,7 +481,9 @@ int main(int argc, char** argv) {
             break;
 
         case VCI_ACQ_MUX:
-            // right now only one rank is supported
+            // The poll_rank call is required, because otherwise switch_mux_for_rank won't know that the DPUs
+            // are in fault and prevent switching the MUX.
+            DPU_ASSERT(dpu_poll_rank(state.ranks[msg.rank_nr].rank));
             switch_mux_for_rank(state.ranks[msg.rank_nr].rank, true);
             break;
 
