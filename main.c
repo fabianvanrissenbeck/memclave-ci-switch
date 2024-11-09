@@ -241,6 +241,14 @@ static dpu_error_t custom_finalize_fault_process_for_dpu(struct dpu_t* dpu, stru
     return status;
 }
 
+static unsigned short get_rank_id(const struct dpu_rank_t* rank) {
+    const short* ptr = (short*)((uint8_t*) rank + 4);
+    unsigned res = (*ptr) & 0xFFF;
+
+    assert(res < 40);
+    return res;
+}
+
 static void reset_for_rank(struct dpu_rank_t* rank, bool set_crypt_regs) {
     struct dpu_context_t* ctx = calloc(MAX_NR_DPUS_PER_RANK, sizeof(*ctx));
     assert(ctx != NULL);
@@ -347,14 +355,6 @@ static int parse_cli_args(int argc, char** argv, cli_args* out_args) {
     return 0;
 }
 
-static unsigned short get_rank_id(const struct dpu_rank_t* rank) {
-    const short* ptr = (short*)((uint8_t*) rank + 4);
-    unsigned res = (*ptr) & 0xFFF;
-
-    assert(res < 40);
-    return res;
-}
-
 static void print_hexdump(size_t n, const uint8_t* buf) {
     FILE* pp = popen("xxd", "w");
 
@@ -417,6 +417,45 @@ static void init_crypto_regs(switch_state* state) {
     }
 }
 
+static int deploy_dpu_ids(struct dpu_rank_t* r, struct dpu_program_t* prog) {
+    struct dpu_symbol_t sym;
+    int err;
+
+    err = dpu_get_symbol(prog, "vault_get_id", &sym);
+
+    if (err) {
+        return err;
+    }
+
+    unsigned rank_id = get_rank_id(r);
+
+    for (int i = 0; i < 64; ++i) {
+        unsigned id = rank_id * 64 + i;
+        struct dpu_t* dpu = dpu_get(r, i / 8, i % 8);
+
+        uint64_t buf[2] = {
+            0x0000606300000000,
+            0x00008c5f00000000
+        };
+
+        buf[0] |= (id & 0xF) << 20;
+        buf[0] |= (id >> 4 & 0xF) << 16;
+
+        uint8_t msn = (id >> 8 & 0xF);
+
+        msn = (msn & 0x8) >> 3 | (msn & 0x4) >> 1 | (msn & 0x2) << 1 | (msn & 0x1) << 3;
+        buf[0] |= msn << 12;
+
+        err = dpu_copy_to_iram_for_dpu(dpu, (sym.address - 0x80000000) / 8, buf, 2);
+
+        if (err) {
+            return err;
+        }
+    }
+
+    return DPU_OK;
+}
+
 int main(int argc, char** argv) {
     cli_args args;
 
@@ -431,10 +470,17 @@ int main(int argc, char** argv) {
     }
 
     struct dpu_set_t set, rank;
+    struct dpu_program_t* prog;
     switch_state state = { 0 };
 
     DPU_ASSERT(dpu_alloc_ranks(args.nr_ranks, s_dpu_profile, &set));
-    DPU_ASSERT(dpu_load(set, "./fault", NULL));
+    DPU_ASSERT(dpu_load(set, "./fault", &prog));
+
+    DPU_RANK_FOREACH(set, rank) {
+        struct dpu_rank_t* r = rank.list.ranks[0];
+        DPU_ASSERT(deploy_dpu_ids(r, prog));
+    }
+
     DPU_ASSERT(dpu_launch(set, DPU_ASYNCHRONOUS));
 
     DPU_RANK_FOREACH(set, rank) {
