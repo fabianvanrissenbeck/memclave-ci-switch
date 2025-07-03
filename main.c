@@ -113,7 +113,7 @@ static vci_msg recv_ci_msg(msg_queue* q) {
         return res;
     }
 
-    if (res.type < 0 || res.type == VCI_QRY_RES || res.type == VCI_OK || res.type > VCI_REL_MUX || res.ci_nr >= 8) {
+    if (res.type < 0 || res.type == VCI_QRY_RES || res.type == VCI_OK || res.type > VCI_REL_MUX) {
         res.type = VCI_MSG_ERR;
     }
 
@@ -138,9 +138,9 @@ static void close_msg_queue(msg_queue* q) {
     close(q->sock);
 }
 
-static void switch_mux_for_line(struct dpu_rank_t* rank, uint8_t line_id, uint8_t mask) {
-    dpu_error_t dpu_switch_mux_for_dpu_line(struct dpu_rank_t*, uint8_t, uint8_t);
-    DPU_ASSERT(dpu_switch_mux_for_dpu_line(rank, line_id, mask));
+static void switch_mux_for_rank(struct dpu_rank_t* rank, bool set_mux_for_host) {
+    dpu_error_t dpu_switch_mux_for_rank(struct dpu_rank_t *, bool);
+    DPU_ASSERT(dpu_switch_mux_for_rank(rank, set_mux_for_host));
 }
 
 static unsigned short get_rank_id(const struct dpu_rank_t* rank) {
@@ -205,101 +205,6 @@ static int parse_cli_args(int argc, char** argv, cli_args* out_args) {
     return 0;
 }
 
-static void print_hexdump(size_t n, const uint8_t* buf) {
-    FILE* pp = popen("xxd", "w");
-
-    if (pp == NULL) {
-        perror("popen()");
-        return;
-    }
-
-    if (fwrite(buf, 1, n, pp) < n) {
-        perror("fwrite()");
-    }
-
-    pclose(pp);
-}
-
-static dpu_error_t clear_and_continue(struct dpu_t* dpu, iram_addr_t* out_addr) {
-    struct dpu_context_t* ctx = calloc(MAX_NR_DPUS_PER_RANK, sizeof(*ctx));
-    assert(ctx != NULL);
-
-    dpu_error_t err = DPU_OK;
-
-    if ((err = dpu_context_fill_from_rank(&ctx[0], dpu_get_rank(dpu)))) {
-        goto fail;
-    }
-
-    if ((err = dpu_initialize_fault_process_for_dpu(dpu, &ctx[0], 0x1000))) {
-        goto fail;
-    }
-
-    if ((err = dpu_extract_pcs_for_dpu(dpu, &ctx[0]))) {
-        goto fail;
-    }
-
-    dpu_thread_t tid = ctx[0].bkp_fault_thread_index;
-    iram_addr_t pc = ctx[0].pcs[tid];
-
-    if (out_addr) {
-        *out_addr = pc;
-    }
-
-    if ((err = dpu_finalize_fault_process_for_dpu(dpu, &ctx[0]))) {
-        goto fail;
-    }
-
-    dpu_free_dpu_context(&ctx[0]);
-
-    fail:
-        free(ctx);
-    return err;
-}
-
-static dpu_error_t wait_for_fault(struct dpu_t* dpu) {
-    bool is_running, fault;
-    dpu_error_t err = DPU_OK;
-    uint64_t timeout = 0;
-
-    do {
-        if ((err = dpu_poll_dpu(dpu, &is_running, &fault))) {
-            return err;
-        }
-
-        usleep(timeout);
-        timeout = timeout ? timeout << 1 : 1;
-    } while (!fault && is_running);
-
-    if (!is_running && !fault) {
-        puts("DPU finished while waiting for fault.");
-        return DPU_ERR_DPU_FAULT;
-    }
-
-    return DPU_OK;
-}
-
-static dpu_error_t dpu_simple_step_over(struct dpu_t* dpu) {
-    dpuinstruction_t buf[2];
-
-    dpuinstruction_t repl_buf[2] = {
-        0x7c6300000000,
-        0x7e6320110101
-    };
-
-    iram_addr_t pc;
-
-    DPU_ASSERT(clear_and_continue(dpu, &pc));
-    DPU_ASSERT(wait_for_fault(dpu));
-    DPU_ASSERT(dpu_copy_from_iram_for_dpu(dpu, buf, pc, 2));
-    DPU_ASSERT(dpu_copy_to_iram_for_dpu(dpu, pc, repl_buf, 2));
-    DPU_ASSERT(clear_and_continue(dpu, NULL));
-    DPU_ASSERT(wait_for_fault(dpu));
-    DPU_ASSERT(dpu_copy_to_iram_for_dpu(dpu, pc, buf, 2));
-    DPU_ASSERT(clear_and_continue(dpu, NULL));
-
-    return DPU_OK;
-}
-
 /**
  * @brief convert from CI and line number to an index between 0 and 63
  * @param slice_id CI number of the DPU
@@ -310,29 +215,32 @@ static uint8_t tuple_to_index(uint8_t slice_id, uint8_t member_id) {
     return 8 * slice_id + member_id;
 }
 
-static uint8_t mux_of_line(switch_state* state, uint8_t rank_nr, uint8_t line) {
-    assert(rank_nr < 40);
-    assert(state->ranks[rank_nr].rank != NULL);
-
-    uint8_t mask = 0;
-
-    for (uint8_t ci = 0; ci < 8; ci++) {
-        uint8_t idx = tuple_to_index(ci, line);
-        mask |= ((state->ranks[rank_nr].mux_state & (1llu << idx)) != 0) << ci;
-    }
-
-    return mask;
-}
-
 static void switch_state_update_mux(switch_state* state, uint8_t rank_nr) {
     assert(rank_nr < 40);
     assert(state->ranks[rank_nr].rank != NULL);
 
-    for (uint8_t line = 0; line < 8; line++) {
-        uint8_t mask = mux_of_line(state, rank_nr, line);
-        switch_mux_for_line(state->ranks[rank_nr].rank, line, mask);
+    if (state->ranks[rank_nr].mux_state == UINT64_MAX) {
+        switch_mux_for_rank(state->ranks[rank_nr].rank, true);
     }
 }
+
+/*
+ *
+ * MUX weirdness
+ *
+ * There are DPU pairs. These are DPUs on different lines with the same CI to the best
+ * of my understanding. Both DPUs are switched simultaniously.
+ *
+ * General Concept
+ *
+ * + Maintain one host and one guest view of the DPU status. The host view specifies which DPUs are
+ *   currently in fault, the guest view specifies which can actually be written two. These
+ *   can be different, because one DPU of a pair may be in fault, but its MUX cannot be switched
+ *   because the pair is still running.
+ * + If two DPUs of a pair are in fault but not yet switched, switch them and add this info to the guest view.
+ * + When resolving a fault, the ci-switch must remove the pair DPU from the
+ *
+ */
 
 static void switch_state_update_rank(switch_state* state, uint8_t rank_nr) {
     assert(rank_nr < 40);
@@ -358,26 +266,148 @@ static void switch_state_update_rank(switch_state* state, uint8_t rank_nr) {
     switch_state_update_mux(state, rank_nr);
 }
 
-static void continue_execution_of(switch_state* state, uint8_t rank_nr, uint8_t line_nr) {
+static dpu_error_t custom_debug_teardown_dpu(struct dpu_t* dpu, struct dpu_context_t* context, dpu_thread_t fault_thread) {
+    uint32_t ufi_select_dpu(struct dpu_rank_t* rank, uint8_t* mask, uint8_t dpu);
+    uint32_t ufi_set_dpu_fault_and_step(struct dpu_rank_t *rank, uint8_t ci_mask);
+    uint32_t ufi_set_bkp_fault(struct dpu_rank_t *rank, uint8_t ci_mask);
+    dpu_error_t ci_start_thread_dpu(struct dpu_t *dpu, dpu_thread_t thread, bool resume, uint8_t *previous);
+    uint32_t ufi_read_bkp_fault(struct dpu_rank_t *rank, uint8_t ci_mask, uint8_t *fault);
+    uint32_t ufi_clear_fault_bkp(struct dpu_rank_t *rank, uint8_t ci_mask);
+    uint32_t ufi_clear_fault_dpu(struct dpu_rank_t *rank, uint8_t ci_mask);
+
+    struct dpu_rank_t* rank = dpu_get_rank(dpu);
+    dpu_slice_id_t slice_id = dpu_get_slice_id(dpu);
+    dpu_member_id_t member_id = dpu_get_member_id(dpu);
+
+    dpu_error_t status;
+    uint8_t nr_of_threads_per_dpu = 24;
+    uint8_t nr_of_running_threads = context->nr_of_running_threads;
+    dpu_thread_t scheduling_order[nr_of_threads_per_dpu];
+    dpu_thread_t each_thread;
+    dpu_thread_t each_running_thread;
+
+    uint8_t mask = 1 << slice_id;
+
+    if ((status = ufi_select_dpu(rank, &mask, member_id)) != DPU_OK) {
+        return status;
+    }
+
+    // 1. Set fault & bkp_fault
+    if ((status = ufi_set_dpu_fault_and_step(rank, mask)) != DPU_OK) {
+        return status;
+    }
+
+    if ((status = ufi_set_bkp_fault(rank, mask)) != DPU_OK) {
+        return status;
+    }
+
+    // 2. Resume running threads
+    for (each_thread = 0; each_thread < nr_of_threads_per_dpu;
+         ++each_thread) {
+        uint8_t scheduling_position = context->scheduling[each_thread];
+        if (scheduling_position != 0xFF) {
+            scheduling_order[scheduling_position] = each_thread;
+        }
+    }
+
+    for (each_running_thread = 0;
+         each_running_thread < nr_of_running_threads;
+         ++each_running_thread) {
+
+        dpu_thread_t tid = scheduling_order[each_running_thread];
+        bool reset_pc = tid == fault_thread;
+
+        if ((status = ci_start_thread_dpu(dpu, tid, !reset_pc, NULL)) != DPU_OK) {
+            return status;
+        }
+    }
+    // Interception Fault Clear
+    if ((status = ufi_read_bkp_fault(rank, mask, NULL)) != DPU_OK) {
+        return status;
+    }
+
+    // 3. Clear bkp_fault & fault
+    if ((status = ufi_clear_fault_bkp(rank, mask)) != DPU_OK) {
+        return status;
+    }
+
+    /* If the DPU was in fault (according to the context), we need to keep it in fault
+     * so that any other process (mostly a host application) will see it in this state.
+     */
+    if (!((context->bkp_fault && context->bkp_fault_id != 0) ||
+          context->mem_fault || context->dma_fault)) {
+        if ((status = ufi_clear_fault_dpu(rank, mask)) != DPU_OK) {
+            return status;
+        }
+    }
+
+    return DPU_OK;
+}
+
+static dpu_error_t custom_finalize_fault_process_for_dpu(struct dpu_t* dpu, struct dpu_context_t* ctx, dpu_thread_t fault_thread) {
+    struct dpu_rank_t* rank = dpu_get_rank(dpu);
+    dpu_error_t status = DPU_OK;
+
+    dpu_lock_rank(rank);
+
+    status = custom_debug_teardown_dpu(dpu, ctx, fault_thread);
+
+    dpu_unlock_rank(rank);
+    return status;
+}
+
+static void reset_for_dpu(struct dpu_t* dpu) {
+    struct dpu_context_t* ctx = calloc(MAX_NR_DPUS_PER_RANK, sizeof(*ctx));
+    assert(ctx != NULL);
+
+    DPU_ASSERT(dpu_context_fill_from_rank(&ctx[0], dpu_get_rank(dpu)));
+    DPU_ASSERT(dpu_initialize_fault_process_for_dpu(dpu, &ctx[0], 0x1000));
+
+    unsigned res = ctx[0].bkp_fault_id;
+
+    if (res != 0x101010) {
+        printf("Received unexpected fault with code %02x\n", res);
+    }
+
+    assert(ctx[0].bkp_fault && res == 0x101010);
+
+    ctx[0].bkp_fault = false;
+    ctx[0].bkp_fault_id = 0;
+
+    dpu_thread_t tid = ctx[0].bkp_fault_thread_index;
+    DPU_ASSERT(custom_finalize_fault_process_for_dpu(dpu, &ctx[0], tid));
+
+    dpu_free_dpu_context(&ctx[0]);
+    free(ctx);
+}
+
+static void continue_execution_of(switch_state* state, uint8_t rank_nr) {
     assert(rank_nr < 40);
     assert(state->ranks[rank_nr].rank != NULL);
 
-    for (int i = 0; i < 8; i++) {
-        uint8_t idx = tuple_to_index(idx, line_nr);
-        state->ranks[rank_nr].mux_state &= ~((uint64_t)(1) << idx);
-    }
+    switch_mux_for_rank(state->ranks[rank_nr].rank, false);
+    state->ranks[rank_nr].mux_state = 0;
 
-    switch_state_update_mux(state, rank_nr);
-
-    for (int i = 0; i < 8; ++i) {
-        struct dpu_t* dpu = dpu_get(state->ranks[rank_nr].rank, i, line_nr);
+    for (int i = 0; i < 64; ++i) {
+        struct dpu_t* dpu = dpu_get(state->ranks[rank_nr].rank, i / 8, i % 8);
 
         bool is_done, is_faulted;
         DPU_ASSERT(dpu_status_dpu(dpu, &is_done, &is_faulted));
 
         assert(is_faulted);
-        DPU_ASSERT(dpu_simple_step_over(dpu));
+        reset_for_dpu(dpu);
     }
+}
+
+static uint8_t count_bits_of(uint64_t n) {
+    uint8_t res = 0;
+
+    while (n) {
+        res += n & 1;
+        n >>= 1;
+    }
+
+    return res;
 }
 
 int main(int argc, char** argv) {
@@ -445,7 +475,7 @@ int main(int argc, char** argv) {
 
         case VCI_REL_MUX:
             switch_state_update_rank(&state, msg.rank_nr);
-            continue_execution_of(&state, msg.rank_nr, msg.line_nr);
+            continue_execution_of(&state, msg.rank_nr);
 
             break;
 
@@ -453,7 +483,8 @@ int main(int argc, char** argv) {
             switch_state_update_rank(&state, msg.rank_nr);
 
             resp.type = VCI_QRY_RES;
-            resp.resp = mux_of_line(&state, msg.rank_nr, msg.line_nr);
+            resp.n_faulted = count_bits_of(state.ranks[msg.rank_nr].mux_state);
+            resp.n_running = 64 - resp.n_faulted;
 
             break;
         }
