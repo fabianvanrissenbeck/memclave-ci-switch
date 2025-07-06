@@ -320,6 +320,8 @@ static dpu_error_t custom_debug_teardown_dpu(struct dpu_t* dpu, struct dpu_conte
         if ((status = ci_start_thread_dpu(dpu, tid, !reset_pc, NULL)) != DPU_OK) {
             return status;
         }
+
+        // printf("[DPU %p] Resuming thread %d\n", dpu, tid);
     }
     // Interception Fault Clear
     if ((status = ufi_read_bkp_fault(rank, mask, NULL)) != DPU_OK) {
@@ -361,6 +363,11 @@ static void reset_for_dpu(struct dpu_t* dpu) {
     assert(ctx != NULL);
 
     DPU_ASSERT(dpu_context_fill_from_rank(&ctx[0], dpu_get_rank(dpu)));
+
+    for (int i = 0; i < 24; ++i) {
+        ctx[0].scheduling[i] = 0xFF;
+    }
+
     DPU_ASSERT(dpu_initialize_fault_process_for_dpu(dpu, &ctx[0], 0x1000));
 
     unsigned res = ctx[0].bkp_fault_id;
@@ -373,6 +380,12 @@ static void reset_for_dpu(struct dpu_t* dpu) {
 
     ctx[0].bkp_fault = false;
     ctx[0].bkp_fault_id = 0;
+
+#if 0
+    // if (dpu == dpu_get(dpu_get_rank(dpu), 0, 0)) {
+        dpu_extract_context_for_dpu(dpu, &ctx[0]);
+    // }
+#endif
 
     dpu_thread_t tid = ctx[0].bkp_fault_thread_index;
     DPU_ASSERT(custom_finalize_fault_process_for_dpu(dpu, &ctx[0], tid));
@@ -410,6 +423,24 @@ static uint8_t count_bits_of(uint64_t n) {
     return res;
 }
 
+static uint8_t* load_file_from(const char* path, size_t* out_size) {
+    FILE* fp = fopen(path, "rb");
+    assert(fp != NULL);
+
+    fseek(fp, 0, SEEK_END);
+    size_t size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    uint8_t* res = malloc(size);
+    assert(res != NULL);
+
+    fread(res, size, 1, fp);
+    fclose(fp);
+
+    *out_size = size;
+    return res;
+}
+
 int main(int argc, char** argv) {
     cli_args args;
 
@@ -423,12 +454,25 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    struct dpu_set_t set, rank;
+    struct dpu_set_t set, rank, dpu;
     struct dpu_program_t* prog;
     switch_state state = { 0 };
 
     DPU_ASSERT(dpu_alloc_ranks(args.nr_ranks, s_dpu_profile, &set));
-    DPU_ASSERT(dpu_load(set, "../fault", &prog));
+    DPU_ASSERT(dpu_load(set, "./reset.elf", NULL));
+    DPU_ASSERT(dpu_launch(set, DPU_SYNCHRONOUS));
+
+    DPU_ASSERT(dpu_load(set, "../ime", &prog));
+
+    size_t msg_sz;
+    uint8_t* msg = load_file_from("../msg.sk", &msg_sz);
+
+    DPU_FOREACH(set, dpu) {
+        DPU_ASSERT(dpu_copy_to_mram(dpu.dpu, 63 << 20, msg, msg_sz));
+    }
+
+    free(msg);
+
     DPU_ASSERT(dpu_launch(set, DPU_ASYNCHRONOUS));
 
     DPU_RANK_FOREACH(set, rank) {
