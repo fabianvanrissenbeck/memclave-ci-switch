@@ -1,5 +1,6 @@
 #include "common/vci-msg.h"
 
+#include <time.h>
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -266,6 +267,13 @@ static void switch_state_update_rank(switch_state* state, uint8_t rank_nr) {
     switch_state_update_mux(state, rank_nr);
 }
 
+static uint64_t get_time_us(void) {
+    struct timespec ts;
+
+    timespec_get(&ts, TIME_UTC);
+    return ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
 static dpu_error_t custom_debug_teardown_dpu(struct dpu_t* dpu, struct dpu_context_t* context, dpu_thread_t fault_thread) {
     uint32_t ufi_select_dpu(struct dpu_rank_t* rank, uint8_t* mask, uint8_t dpu);
     uint32_t ufi_set_dpu_fault_and_step(struct dpu_rank_t *rank, uint8_t ci_mask);
@@ -368,7 +376,21 @@ static void reset_for_dpu(struct dpu_t* dpu) {
         ctx[0].scheduling[i] = 0xFF;
     }
 
+#if 0
+    uint64_t start_time = get_time_us();
     DPU_ASSERT(dpu_initialize_fault_process_for_dpu(dpu, &ctx[0], 0x1000));
+
+    int nr_thread_running = 0;
+    int thread_running = -1;
+
+    for (int i = 0; i < 24; ++i) {
+        if (ctx[0].scheduling[i] != 0xFF) {
+            nr_thread_running++;
+            thread_running = i;
+        }
+    }
+
+    printf("[TIME] Time elapsed: %.2f Threads Running: %d Thread Running: %d\n", (double)(get_time_us() - start_time) / 1000.0, nr_thread_running, thread_running);
 
     unsigned res = ctx[0].bkp_fault_id;
 
@@ -388,6 +410,11 @@ static void reset_for_dpu(struct dpu_t* dpu) {
 #endif
 
     dpu_thread_t tid = ctx[0].bkp_fault_thread_index;
+#endif
+
+    dpu_thread_t tid = 0;
+    ctx[0].scheduling[0] = 0;
+
     DPU_ASSERT(custom_finalize_fault_process_for_dpu(dpu, &ctx[0], tid));
 
     dpu_free_dpu_context(&ctx[0]);
@@ -493,6 +520,8 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        uint64_t start_time = get_time_us();
+
         // mirror rank number in responses to allow multiple ranks to use a single socket
         vci_msg resp = {
                 .type = VCI_OK,
@@ -533,9 +562,13 @@ int main(int argc, char** argv) {
             break;
         }
 
+        uint64_t elapsed = get_time_us() - start_time;
+
         if (send_ci_msg(&q, resp) < 0) {
             printf("[FAIL] Cannot send message: %s\n", strerror(errno));
         }
+
+        printf("[TIME] Time elapsed: %.2fms\n", (double) elapsed / 1000.0);
     }
 
     dpu_free(set);
