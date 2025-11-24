@@ -41,6 +41,20 @@ typedef struct switch_state {
     } ranks[40];
 } switch_state;
 
+struct {
+    size_t sz;
+    uint8_t* fsl;
+} g_fsl;
+
+__attribute__((constructor))
+static void init_g_fsl(void) {
+    extern uint8_t _binary_fsl_start[];
+    extern uint8_t _binary_fsl_end[];
+
+    g_fsl.fsl = _binary_fsl_start;
+    g_fsl.sz = (size_t) (&_binary_fsl_end[0]) - (size_t) (&_binary_fsl_start[0]);
+}
+
 static const char* s_dpu_profile = "backend=hw,rankMode=perf";
 
 /** set to true on SIGTERM and SIGINT to properly cleanup allocated data before exiting */
@@ -468,6 +482,15 @@ static uint8_t* load_file_from(const char* path, size_t* out_size) {
     return res;
 }
 
+static void load_key_seed(uint8_t seed[32]) {
+    FILE* fp = fopen("/dev/urandom", "rb");
+
+    assert(fp != NULL);
+    assert(fread(seed, 1, 32, fp) == 32);
+
+    fclose(fp);
+}
+
 int main(int argc, char** argv) {
     cli_args args;
 
@@ -486,20 +509,12 @@ int main(int argc, char** argv) {
     switch_state state = { 0 };
 
     DPU_ASSERT(dpu_alloc_ranks(args.nr_ranks, s_dpu_profile, &set));
-    DPU_ASSERT(dpu_load(set, "./reset.elf", NULL));
-    DPU_ASSERT(dpu_launch(set, DPU_SYNCHRONOUS));
+    DPU_ASSERT(dpu_load_from_memory(set, g_fsl.fsl, g_fsl.sz, &prog));
 
-    DPU_ASSERT(dpu_load(set, "../ime", &prog));
+    uint8_t key_seed[32];
+    load_key_seed(key_seed);
 
-    size_t msg_sz;
-    uint8_t* msg = load_file_from("../msg.sk", &msg_sz);
-
-    DPU_FOREACH(set, dpu) {
-        DPU_ASSERT(dpu_copy_to_mram(dpu.dpu, 63 << 20, msg, msg_sz));
-    }
-
-    free(msg);
-
+    DPU_ASSERT(dpu_copy_to(set, "key_seed", 0, key_seed, sizeof(key_seed)));
     DPU_ASSERT(dpu_launch(set, DPU_ASYNCHRONOUS));
 
     DPU_RANK_FOREACH(set, rank) {
