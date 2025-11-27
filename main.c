@@ -25,6 +25,8 @@
 
 typedef struct cli_args {
     int nr_ranks;
+    /** if not -1, allocate only one rank with the specified rank number */
+    int exact;
 } cli_args;
 
 typedef struct msg_queue {
@@ -168,7 +170,8 @@ static unsigned short get_rank_id(const struct dpu_rank_t* rank) {
 
 static int parse_cli_args(int argc, char** argv, cli_args* out_args) {
     *out_args = (cli_args) {
-        .nr_ranks = 1
+        .nr_ranks = 1,
+        .exact = -1
     };
 
     for (int i = 1; i < argc; ++i) {
@@ -196,7 +199,7 @@ static int parse_cli_args(int argc, char** argv, cli_args* out_args) {
         size_t val_len = strlen(val);
         size_t key_len = len - val_len - 1;
 
-        if (key_len == sizeof("nr_ranks") - 1 && memcmp(key, "nr-ranks", key_len) == 0) {
+        if (key_len == sizeof("nr-ranks") - 1 && memcmp(key, "nr-ranks", key_len) == 0) {
             char* end_ptr = NULL;
             long nr_ranks = strtol(val, &end_ptr, 10);
 
@@ -210,11 +213,31 @@ static int parse_cli_args(int argc, char** argv, cli_args* out_args) {
                 return -1;
             }
 
-            out_args->nr_ranks = nr_ranks;
+            out_args->nr_ranks = (int) nr_ranks;
+        } else if (key_len == sizeof("exact-rank") - 1 && memcmp(key, "exact-rank", key_len) == 0) {
+            char* end_ptr = NULL;
+            long exact = strtol(val, &end_ptr, 10);
+
+            if (end_ptr == val || *end_ptr != '\0' || !isdigit(val[0])) {
+                printf("[FAIL] Invalid value for option --nr-ranks\n");
+                return -1;
+            }
+
+            if (exact < 0 || exact >= 39) {
+                printf("[FAIL] Value out of range for option --exact-rank\n");
+                return -1;
+            }
+
+            out_args->exact = (int) exact;
         } else {
             printf("[FAIL] Unkown option --%.*s\n", (int) key_len, key);
             return -1;
         }
+    }
+
+    if (out_args->exact >= 0 && out_args->nr_ranks > 1) {
+        printf("[FAIL] Only one rank can be allocated if --exact-rank is used\n");
+        return -1;
     }
 
     return 0;
@@ -491,6 +514,34 @@ static void load_key_seed(uint8_t seed[32]) {
     fclose(fp);
 }
 
+static dpu_error_t alloc_exact_rank(int rank_no, struct dpu_set_t* out) {
+    struct dpu_set_t all, rank;
+    dpu_error_t err;
+    bool found = false;
+
+    if ((err = dpu_alloc_ranks(DPU_ALLOCATE_ALL, s_dpu_profile, &all)) != DPU_OK) {
+        puts("[FAIL] cannot temporarily allocate all ranks\n");
+        return err;
+    }
+
+    DPU_RANK_FOREACH(all, rank) {
+        unsigned short id = get_rank_id(rank.list.ranks[0]);
+
+        if (id != rank_no) {
+            dpu_free_rank(rank.list.ranks[0]);
+        } else {
+            found = true;
+            *out = rank;
+        }
+    }
+
+    if (!found) {
+        return DPU_ERR_ALLOCATION;
+    }
+
+    return DPU_OK;
+}
+
 int main(int argc, char** argv) {
     cli_args args;
 
@@ -508,7 +559,12 @@ int main(int argc, char** argv) {
     struct dpu_program_t* prog;
     switch_state state = { 0 };
 
-    DPU_ASSERT(dpu_alloc_ranks(args.nr_ranks, s_dpu_profile, &set));
+    if (args.exact >= 0) {
+        DPU_ASSERT(alloc_exact_rank(args.exact, &set));
+    } else {
+        DPU_ASSERT(dpu_alloc_ranks(args.nr_ranks, s_dpu_profile, &set));
+    }
+
     DPU_ASSERT(dpu_load_from_memory(set, g_fsl.fsl, g_fsl.sz, &prog));
 
     uint8_t key_seed[32];
