@@ -570,6 +570,12 @@ int main(int argc, char** argv) {
     uint8_t key_seed[32];
     load_key_seed(key_seed);
 
+    size_t j;
+
+    DPU_FOREACH(set, dpu, j) {
+        DPU_ASSERT(dpu_copy_to(dpu, "dpu_index", 0, (uint32_t[]) { j + 1 }, sizeof(uint32_t)));
+    }
+
     DPU_ASSERT(dpu_copy_to(set, "key_seed", 0, key_seed, sizeof(key_seed)));
     DPU_ASSERT(dpu_launch(set, DPU_ASYNCHRONOUS));
 
