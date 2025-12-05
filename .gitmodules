@@ -1,3 +1,6 @@
 [submodule "common"]
 	path = common
 	url = git@gitlab.fachschaften.org:ba/common.git
+[submodule "ime"]
+	path = ime
+	url = git@projects.cispa.saarland:fabian.van-rissenbeck/ime.git
