@@ -51,6 +51,19 @@ cmake -DCMAKE_BUILD_TYPE=Debug -B build
 cmake --build build --target ci-switch
 ```
 
+Once build, you may want to move the ci-switch binary to your actual
+UPMEM system. You can copy files out of docker containers, by first getting
+their container id via
+```bash
+docker container ls
+```
+and then copying out the ci-switch binary via
+```
+docker cp 7c899dbc8a53:/home/pim/ci-switch/build/ci-switch ~/Downloads
+```
+assuming the container id is `7c899dbc8a53` and you want to copy the file
+to your local `~/Downloads` folder.
+
 **Using the CI-switch**
 
 The CI-switch supports two command line options:
